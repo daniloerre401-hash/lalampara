@@ -64,7 +64,7 @@ async def get_page():
 
     p = await async_playwright().start()
     playwright = p
-    browser = await p.chromium.launch(headless=False)
+    browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
     page = await browser.new_page()
     await page.goto(ADRES_URL, wait_until="networkidle", timeout=60000)
     logger.info("Navegador abierto. Resuelve el CAPTCHA en la ventana.")
