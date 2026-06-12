@@ -79,7 +79,10 @@ async def consultar_adres(doc_type_value: str, doc_number: str) -> str:
 
     try:
         if await p.locator("#tipoDoc").count() == 0:
-            return "No se encontró el formulario."
+            await p.goto(ADRES_URL, wait_until="networkidle", timeout=60000)
+            await asyncio.sleep(2)
+            if await p.locator("#tipoDoc").count() == 0:
+                return "No se encontró el formulario."
 
         await p.evaluate(f"document.getElementById('tipoDoc').value = '{doc_type_value}';")
         await p.evaluate(f"document.getElementById('txtNumDoc').value = '{doc_number}';")
