@@ -123,8 +123,14 @@ async def consultar_adres(doc_type_value: str, doc_number: str) -> str:
                     result_url = base + '/' + result_url
                 logger.info(f"Abriendo resultado: {result_url}")
 
-                await p.goto(result_url, wait_until="networkidle", timeout=30000)
-                await asyncio.sleep(2)
+                try:
+                    await p.goto(result_url, wait_until="load", timeout=60000)
+                except Exception:
+                    try:
+                        await p.goto(result_url, wait_until="domcontentloaded", timeout=60000)
+                    except Exception:
+                        pass
+                await asyncio.sleep(3)
 
                 text = await p.locator("body").inner_text()
                 lines = [l.strip() for l in text.split("\n") if l.strip()]
