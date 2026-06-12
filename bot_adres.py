@@ -217,7 +217,7 @@ async def consulta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(result)
 
 
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stop(update: Update = None, context: ContextTypes.DEFAULT_TYPE = None):
     global browser, playwright, page
     for obj in (page, browser, playwright):
         if obj:
@@ -228,7 +228,8 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     browser = None
     page = None
     playwright = None
-    await update.effective_message.reply_text("Navegador cerrado.")
+    if update and update.effective_message:
+        await update.effective_message.reply_text("Navegador cerrado.")
 
 
 async def screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -297,8 +298,11 @@ def main():
     try:
         app.run_polling(allowed_updates=Update.ALL_TYPES)
     finally:
-        if playwright:
-            asyncio.run(stop(None, None))
+        try:
+            if browser:
+                asyncio.run(browser.close())
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
