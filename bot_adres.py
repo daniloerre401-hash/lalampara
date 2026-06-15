@@ -5,12 +5,14 @@ import asyncio
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from playwright.async_api import async_playwright
+
+from services import adres, policia, sisben, rama_judicial, procuraduria, simit, runt, rues
+from services.browser_manager import kill_browser, get_page, browser_ready
 
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-ADRES_URL = "https://aplicaciones.adres.gov.co/BDUA_Internet/Pages/ConsultarAfiliadoWeb_2.aspx"
+ADRES_URL = adres.ADRES_URL
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -18,269 +20,397 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DOCUMENT_TYPES = {
-    "cedula": "CC",
-    "ti": "TI",
-    "ce": "CE",
-    "pasaporte": "PA",
-    "rc": "RC",
-    "nu": "NU",
-    "as": "AS",
-    "ms": "MS",
-    "cd": "CD",
-    "cn": "CN",
-    "sc": "SC",
-    "pe": "PE",
-    "pt": "PT",
-}
-
-browser = None
-page = None
-playwright = None
-
-
-async def get_page():
-    global browser, page, playwright
-    if page:
-        try:
-            await page.evaluate("1")
-            return page
-        except Exception:
-            page = None
-
-    if browser:
-        try:
-            await browser.close()
-        except Exception:
-            pass
-        browser = None
-
-    if playwright:
-        try:
-            await playwright.stop()
-        except Exception:
-            pass
-        playwright = None
-
-    p = await async_playwright().start()
-    playwright = p
-    browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-    page = await browser.new_page()
-    await page.goto(ADRES_URL, wait_until="networkidle", timeout=60000)
-    logger.info("Navegador abierto. Resuelve el CAPTCHA en la ventana.")
-    return page
+HELP_TEXT = (
+    "*BOT DE CONSULTAS COLOMBIA*\n"
+    "===============================\n"
+    "*Salud y Seguridad Social:*\n"
+    "  /adres <tipo> <numero> - Afiliacion EPS (cedula, ti, ce, rc, pasaporte...)\n"
+    "  /sisben <tipo> <numero> - Grupo Sisben IV (cedula, ti, ce, rc)\n"
+    "\n"
+    "*Antecedentes y Judicial:*\n"
+    "  /policia <tipo> <numero> - Antecedentes judiciales (cedula, ti, ce)\n"
+    "  /procuraduria <tipo> <numero> - Antecedentes disciplinarios\n"
+    "  /rama_nombre <nombre> <apellido> - Procesos judiciales por nombre\n"
+    "  /rama_doc <numero> - Procesos judiciales por documento\n"
+    "  /rama_proc <numero> - Procesos judiciales por radicado\n"
+    "\n"
+    "*Transito y Vehiculos:*\n"
+    "  /simit <tipo> <numero> - Multas de transito (cedula, nit)\n"
+    "  /runt_placa <placa> - Informacion vehicular por placa (ABC123)\n"
+    "  /runt_doc <numero> - Vehiculos por documento del propietario\n"
+    "\n"
+    "*Comercio:*\n"
+    "  /rues <numero> - Registro mercantil por documento\n"
+    "  /rues_nombre <nombre> - Registro mercantil por nombre\n"
+    "\n"
+    "*Batch:*\n"
+    "  /full <tipo> <numero> - Todas las consultas para una persona\n"
+    "\n"
+    "*Utilidades:*\n"
+    "  /start - Abrir navegador\n"
+    "  /stop - Cerrar navegador\n"
+    "  /status - Ver estado del navegador\n"
+    "  /help - Este mensaje\n"
+)
 
 
-async def consultar_adres(doc_type_value: str, doc_number: str) -> str:
-    try:
-        p = await get_page()
-    except Exception as e:
-        return f"Error al abrir el navegador: {e}. Usa /start"
-
-    try:
-        if await p.locator("#tipoDoc").count() == 0:
-            await p.goto(ADRES_URL, wait_until="networkidle", timeout=60000)
-            await asyncio.sleep(2)
-            if await p.locator("#tipoDoc").count() == 0:
-                return "No se encontró el formulario."
-
-        await p.evaluate(f"document.getElementById('tipoDoc').value = '{doc_type_value}';")
-        await p.evaluate(f"document.getElementById('txtNumDoc').value = '{doc_number}';")
-
-        result_data = await p.evaluate("""() => {
-            const btn = document.getElementById('btnConsultar');
-            const form = document.forms[0];
-            if (!btn || !form) return 'ERR: no form/btn';
-
-            const fd = new FormData(form);
-            fd.append(btn.name, btn.value);
-
-            return new Promise((resolve) => {
-                const xhr = new XMLHttpRequest();
-                xhr.open('POST', form.action, true);
-                xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-                xhr.onload = () => {
-                    const text = xhr.responseText || '';
-                    resolve('OK:' + xhr.status + ':' + text);
-                };
-                xhr.onerror = () => resolve('ERR:xhr_error');
-                xhr.ontimeout = () => resolve('ERR:timeout');
-                xhr.timeout = 25000;
-                xhr.send(new URLSearchParams(fd).toString());
-            });
-        }""")
-
-        if result_data.startswith('ERR:'):
-            return result_data
-
-        if result_data.startswith('OK:'):
-            parts = result_data.split(':', 2)
-            html = parts[2] if len(parts) > 2 else ''
-
-            import re as _re
-            m = _re.search(r"window\.open\('([^']+)", html)
-            if m:
-                result_url = m.group(1)
-                if not result_url.startswith('http'):
-                    base = ADRES_URL.rsplit('/', 1)[0]
-                    result_url = base + '/' + result_url
-                logger.info(f"Abriendo resultado: {result_url}")
-
-                try:
-                    await p.goto(result_url, wait_until="load", timeout=60000)
-                except Exception:
-                    try:
-                        await p.goto(result_url, wait_until="domcontentloaded", timeout=60000)
-                    except Exception:
-                        pass
-                await asyncio.sleep(3)
-
-                text = await p.locator("body").inner_text()
-                lines = [l.strip() for l in text.split("\n") if l.strip()]
-                start = next((i for i, l in enumerate(lines) if "Información Básica" in l), 0)
-                end = next((i for i, l in enumerate(lines) if "Fecha de Impresión" in l), len(lines))
-                data = lines[start:end+1] if end < len(lines) else lines[start:]
-                return "\n".join(data[:15])
-
-            solo_texto = _re.sub(r'<[^>]+>', ' ', html)
-            solo_texto = _re.sub(r'&[^;]+;', ' ', solo_texto)
-            solo_texto = _re.sub(r'\s+', ' ', solo_texto).strip()
-            lines = [l.strip() for l in solo_texto.split("\n") if l.strip()]
-            relevant = [l for l in lines if any(k in l.upper() for k in [
-                "NOMBRE", "APELLIDO", "ESTADO", "EPS", "REGIMEN",
-                "AFILIACION", "AFILIADO", "DOCUMENTO", "CEDULA",
-                "IDENTIFICACION", "MUNICIPIO", "DEPARTAMENTO",
-                "ACTIVO", "SUSPENDIDO", "RETIRADO", "FECHA",
-                "COTIZANTE", "BENEFICIARIO", "CONTRIBUTIVO", "SUBSIDIADO",
-            ])]
-            if relevant:
-                return "\n".join(relevant[:30])
-            return solo_texto[:1500]
-
-        return result_data
-
-    except Exception as e:
-        logger.exception("Error en consulta")
-        estr = str(e)
-        if "closed" in estr.lower() or "detached" in estr.lower():
-            return "La ventana del navegador se cerró. Usa /start para reabrirla."
-        return f"Error: {estr[:200]}"
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(HELP_TEXT, parse_mode="Markdown")
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tipos = ", ".join(DOCUMENT_TYPES.keys())
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
-        "Abriendo navegador para ADRES...\n\n"
-        "Usá:\n"
-        f"/consulta <tipo> <numero>\n\n"
-        f"Tipos válidos: {tipos}\n\n"
-        "Ej: /consulta cedula 888811111"
+        "Abriendo navegador...\n" + HELP_TEXT,
+        parse_mode="Markdown",
     )
-
     try:
-        await get_page()
-        await update.effective_message.reply_text(
-            "Navegador listo."
-        )
+        await get_page(ADRES_URL)
+        await update.effective_message.reply_text("Navegador listo.")
     except Exception as e:
         await update.effective_message.reply_text(f"Error al abrir navegador: {e}")
 
 
-async def consulta(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ready = await browser_ready()
+    if ready:
+        await update.effective_message.reply_text("Navegador activo y funcionando.")
+    else:
         await update.effective_message.reply_text(
-            "Uso: /consulta <tipo> <numero>\nEj: /consulta cedula 888811111"
+            "Navegador no activo. Usa /start para abrirlo."
         )
-        return
-
-    doc_key = context.args[0].lower()
-    doc_number = context.args[1]
-
-    if doc_key not in DOCUMENT_TYPES:
-        tipos = ", ".join(DOCUMENT_TYPES.keys())
-        await update.effective_message.reply_text(f"Tipo inválido. Válidos: {tipos}")
-        return
-
-    if not doc_number.isdigit():
-        await update.effective_message.reply_text("El número debe ser numérico.")
-        return
-
-    doc_value = DOCUMENT_TYPES[doc_key]
-    msg = await update.effective_message.reply_text(
-        f"Consultando {doc_key} {doc_number}..."
-    )
-
-    result = await consultar_adres(doc_value, doc_number)
-    try:
-        await msg.edit_text(result)
-    except Exception:
-        await update.effective_message.reply_text(result)
 
 
-async def stop(update: Update = None, context: ContextTypes.DEFAULT_TYPE = None):
-    global browser, playwright, page
-    for obj in (page, browser, playwright):
-        if obj:
-            try:
-                await obj.close()
-            except Exception:
-                pass
-    browser = None
-    page = None
-    playwright = None
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await kill_browser()
     if update and update.effective_message:
         await update.effective_message.reply_text("Navegador cerrado.")
 
 
-async def screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global page
-    if not page:
-        await update.effective_message.reply_text("No hay navegador abierto. Usa /start")
+async def cmd_adres(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_browser(update):
         return
-    try:
-        await page.evaluate("1")
-        png = await page.screenshot(type="png")
-        await update.effective_message.reply_photo(photo=png)
-    except Exception as e:
-        await update.effective_message.reply_text(f"Error: {e}")
+    args = context.args
+    if len(args) < 2:
+        await update.effective_message.reply_text(
+            "Uso: /adres <tipo> <numero>\nEj: /adres cedula 888811111\n"
+            "Tipos: " + ", ".join(adres.DOCUMENT_TYPES.keys())
+        )
+        return
+    doc_key = args[0].lower()
+    doc_number = args[1]
+    if doc_key not in adres.DOCUMENT_TYPES:
+        await update.effective_message.reply_text(
+            "Tipo invalido. Validos: " + ", ".join(adres.DOCUMENT_TYPES.keys())
+        )
+        return
+    if not doc_number.isdigit():
+        await update.effective_message.reply_text("El numero debe ser numerico.")
+        return
+
+    msg = await _send_temp(update, f"Consultando ADRES: {doc_key} {doc_number}...")
+    result = await adres.consultar(adres.DOCUMENT_TYPES[doc_key], doc_number)
+    await _edit_or_reply(update, msg, result)
 
 
-async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global page
-    if not page:
-        await update.effective_message.reply_text("No hay navegador. Usa /start")
+async def cmd_policia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_browser(update):
         return
+    args = context.args
+    if len(args) < 2:
+        await update.effective_message.reply_text(
+            "Uso: /policia <tipo> <numero>\nEj: /policia cedula 888811111\n"
+            "Tipos: " + ", ".join(policia.DOCUMENT_TYPES_POLICIA.keys())
+        )
+        return
+    doc_key = args[0].lower()
+    doc_number = args[1]
+    if doc_key not in policia.DOCUMENT_TYPES_POLICIA:
+        await update.effective_message.reply_text(
+            "Tipo invalido. Validos: " + ", ".join(policia.DOCUMENT_TYPES_POLICIA.keys())
+        )
+        return
+    if not doc_number.isdigit():
+        await update.effective_message.reply_text("El numero debe ser numerico.")
+        return
+
+    msg = await _send_temp(update, f"Consultando Policia: {doc_key} {doc_number}...")
+    result = await policia.consultar(doc_key, doc_number)
+    await _edit_or_reply(update, msg, result)
+
+
+async def cmd_sisben(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_browser(update):
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.effective_message.reply_text(
+            "Uso: /sisben <tipo> <numero>\nEj: /sisben cedula 888811111\n"
+            "Tipos: " + ", ".join(sisben.DOCUMENT_TYPES_SISBEN.keys())
+        )
+        return
+    doc_key = args[0].lower()
+    doc_number = args[1]
+    if doc_key not in sisben.DOCUMENT_TYPES_SISBEN:
+        await update.effective_message.reply_text(
+            "Tipo invalido. Validos: " + ", ".join(sisben.DOCUMENT_TYPES_SISBEN.keys())
+        )
+        return
+    if not doc_number.isdigit():
+        await update.effective_message.reply_text("El numero debe ser numerico.")
+        return
+
+    msg = await _send_temp(update, f"Consultando SISBEN: {doc_key} {doc_number}...")
+    result = await sisben.consultar(doc_key, doc_number)
+    await _edit_or_reply(update, msg, result)
+
+
+async def cmd_rama_nombre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_browser(update):
+        return
+    args = context.args
+    if len(args) < 1:
+        await update.effective_message.reply_text(
+            "Uso: /rama_nombre <nombres> [apellidos]\nEj: /rama_nombre Juan Perez"
+        )
+        return
+    nombres = args[0]
+    apellidos = " ".join(args[1:]) if len(args) > 1 else ""
+
+    msg = await _send_temp(update, f"Consultando Rama Judicial por nombre: {nombres} {apellidos}...")
+    result = await rama_judicial.consultar_por_nombre(nombres, apellidos)
+    await _edit_or_reply(update, msg, result)
+
+
+async def cmd_rama_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_browser(update):
+        return
+    args = context.args
+    if len(args) < 1:
+        await update.effective_message.reply_text(
+            "Uso: /rama_doc <numero_documento>\nEj: /rama_doc 888811111"
+        )
+        return
+    doc_number = args[0]
+    if not doc_number.isdigit():
+        await update.effective_message.reply_text("El numero debe ser numerico.")
+        return
+
+    msg = await _send_temp(update, f"Consultando Rama Judicial por doc: {doc_number}...")
+    result = await rama_judicial.consultar_por_documento(doc_number)
+    await _edit_or_reply(update, msg, result)
+
+
+async def cmd_rama_proc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_browser(update):
+        return
+    args = context.args
+    if len(args) < 1:
+        await update.effective_message.reply_text(
+            "Uso: /rama_proc <numero_proceso>\nEj: /rama_proc 11001400300120240000100"
+        )
+        return
+    numero_proceso = args[0]
+
+    msg = await _send_temp(update, f"Consultando Rama Judicial por proceso: {numero_proceso}...")
+    result = await rama_judicial.consultar_por_proceso(numero_proceso)
+    await _edit_or_reply(update, msg, result)
+
+
+async def cmd_procuraduria(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_browser(update):
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.effective_message.reply_text(
+            "Uso: /procuraduria <tipo> <numero>\nEj: /procuraduria cedula 888811111\n"
+            "Tipos: " + ", ".join(procuraduria.DOCUMENT_TYPES_PROC.keys())
+        )
+        return
+    doc_key = args[0].lower()
+    doc_number = args[1]
+    if doc_key not in procuraduria.DOCUMENT_TYPES_PROC:
+        await update.effective_message.reply_text(
+            "Tipo invalido. Validos: " + ", ".join(procuraduria.DOCUMENT_TYPES_PROC.keys())
+        )
+        return
+    if not doc_number.isdigit():
+        await update.effective_message.reply_text("El numero debe ser numerico.")
+        return
+
+    msg = await _send_temp(update, f"Consultando Procuraduria: {doc_key} {doc_number}...")
+    result = await procuraduria.consultar(doc_key, doc_number)
+    await _edit_or_reply(update, msg, result)
+
+
+async def cmd_simit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_browser(update):
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.effective_message.reply_text(
+            "Uso: /simit <tipo> <numero>\nEj: /simit cedula 888811111\n"
+            "Tipos: " + ", ".join(simit.DOCUMENT_TYPES_SIMIT.keys())
+        )
+        return
+    doc_key = args[0].lower()
+    doc_number = args[1]
+    if doc_key not in simit.DOCUMENT_TYPES_SIMIT:
+        await update.effective_message.reply_text(
+            "Tipo invalido. Validos: " + ", ".join(simit.DOCUMENT_TYPES_SIMIT.keys())
+        )
+        return
+    if not doc_number.isdigit():
+        await update.effective_message.reply_text("El numero debe ser numerico.")
+        return
+
+    msg = await _send_temp(update, f"Consultando SIMIT: {doc_key} {doc_number}...")
+    result = await simit.consultar(doc_key, doc_number)
+    await _edit_or_reply(update, msg, result)
+
+
+async def cmd_runt_placa(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_browser(update):
+        return
+    args = context.args
+    if len(args) < 1:
+        await update.effective_message.reply_text(
+            "Uso: /runt_placa <placa>\nEj: /runt_placa ABC123"
+        )
+        return
+    placa = args[0].upper()
+
+    msg = await _send_temp(update, f"Consultando RUNT placa: {placa}...")
+    result = await runt.consultar_vehiculo(placa)
+    await _edit_or_reply(update, msg, result)
+
+
+async def cmd_runt_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_browser(update):
+        return
+    args = context.args
+    if len(args) < 1:
+        await update.effective_message.reply_text(
+            "Uso: /runt_doc <numero_documento>\nEj: /runt_doc 888811111"
+        )
+        return
+    doc_number = args[0]
+    if not doc_number.isdigit():
+        await update.effective_message.reply_text("El numero debe ser numerico.")
+        return
+
+    msg = await _send_temp(update, f"Consultando RUNT por documento: {doc_number}...")
+    result = await runt.consultar_por_documento(doc_number)
+    await _edit_or_reply(update, msg, result)
+
+
+async def cmd_rues(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_browser(update):
+        return
+    args = context.args
+    if len(args) < 1:
+        await update.effective_message.reply_text(
+            "Uso: /rues <numero_documento>\nEj: /rues 888811111"
+        )
+        return
+    doc_number = args[0]
+    if not doc_number.isdigit():
+        await update.effective_message.reply_text("El numero debe ser numerico.")
+        return
+
+    msg = await _send_temp(update, f"Consultando RUES: {doc_number}...")
+    result = await rues.consultar_empresa(doc_number)
+    await _edit_or_reply(update, msg, result)
+
+
+async def cmd_rues_nombre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_browser(update):
+        return
+    args = context.args
+    if len(args) < 1:
+        await update.effective_message.reply_text(
+            "Uso: /rues_nombre <nombre>\nEj: /rues_nombre \"Empresa SAS\""
+        )
+        return
+    nombre = " ".join(args)
+
+    msg = await _send_temp(update, f"Consultando RUES por nombre: {nombre}...")
+    result = await rues.consultar_por_nombre(nombre)
+    await _edit_or_reply(update, msg, result)
+
+
+async def cmd_full(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_browser(update):
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.effective_message.reply_text(
+            "Uso: /full <tipo> <numero>\nEj: /full cedula 888811111\n"
+            "Ejecuta ADRES + Policia + Procuraduria + SISBEN + Rama Judicial + SIMIT"
+        )
+        return
+    doc_key = args[0].lower()
+    doc_number = args[1]
+
+    if not doc_number.isdigit():
+        await update.effective_message.reply_text("El numero debe ser numerico.")
+        return
+
+    msg = await _send_temp(update, f"Ejecutando todas las consultas para {doc_key} {doc_number}...")
+
+    results = []
+
+    if doc_key in adres.DOCUMENT_TYPES:
+        results.append(await adres.consultar(adres.DOCUMENT_TYPES[doc_key], doc_number))
+
+    if doc_key in policia.DOCUMENT_TYPES_POLICIA:
+        results.append(await policia.consultar(doc_key, doc_number))
+
+    if doc_key in procuraduria.DOCUMENT_TYPES_PROC:
+        results.append(await procuraduria.consultar(doc_key, doc_number))
+
+    if doc_key in sisben.DOCUMENT_TYPES_SISBEN:
+        results.append(await sisben.consultar(doc_key, doc_number))
+
+    results.append(await rama_judicial.consultar_por_documento(doc_number))
+
+    if doc_key in simit.DOCUMENT_TYPES_SIMIT:
+        results.append(await simit.consultar(doc_key, doc_number))
+
+    combined = "\n\n".join(results)
+    await _edit_or_reply(update, msg, combined)
+
+
+async def _check_browser(update: Update) -> bool:
+    ready = await browser_ready()
+    if not ready:
+        await update.effective_message.reply_text(
+            "Navegador no activo. Usa /start para iniciarlo."
+        )
+        return False
+    return True
+
+
+async def _send_temp(update: Update, text: str):
+    return await update.effective_message.reply_text(text)
+
+
+async def _edit_or_reply(update: Update, msg, result: str):
     try:
-        await page.evaluate("1")
-        title = await page.title()
-        selects = await page.evaluate("""() =>
-            Array.from(document.querySelectorAll('select')).map(s => ({
-                id: s.id, name: s.name, options: Array.from(s.options).map(o => ({text: o.text, value: o.value}))
-            }))
-        """)
-        inputs = await page.evaluate("""() =>
-            Array.from(document.querySelectorAll('input[type=text], input[type=number]')).map(i => ({
-                id: i.id, name: i.name, placeholder: i.placeholder
-            }))
-        """)
-        buttons = await page.evaluate("""() =>
-            Array.from(document.querySelectorAll('input[type=submit], button')).map(b => ({
-                id: b.id, type: b.type, value: b.value, text: b.innerText?.slice(0,50)
-            }))
-        """)
-        lines = [f"Title: {title}"]
-        lines.append(f"\nSELECTS ({len(selects)}):")
-        for s in selects:
-            lines.append(f"  id={s['id']}, opciones={s['options']}")
-        lines.append(f"\nINPUTS ({len(inputs)}):")
-        for i in inputs:
-            lines.append(f"  id={i['id']}")
-        lines.append(f"\nBOTONES ({len(buttons)}):")
-        for b in buttons:
-            lines.append(f"  id={b['id']}, text={b['value'] or b['text']}")
-        await update.effective_message.reply_text("\n".join(lines))
-    except Exception as e:
-        await update.effective_message.reply_text(f"Error: {e}")
+        if len(result) > 4000:
+            for i in range(0, len(result), 4000):
+                chunk = result[i:i + 4000]
+                if i == 0:
+                    await msg.edit_text(chunk)
+                else:
+                    await update.effective_message.reply_text(chunk)
+        else:
+            await msg.edit_text(result)
+    except Exception:
+        try:
+            await update.effective_message.reply_text(result)
+        except Exception:
+            for i in range(0, len(result), 4000):
+                await update.effective_message.reply_text(result[i:i + 4000])
 
 
 def main():
@@ -288,23 +418,36 @@ def main():
         raise ValueError("TELEGRAM_TOKEN no configurado en .env")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("consulta", consulta))
-    app.add_handler(CommandHandler("stop", stop))
-    app.add_handler(CommandHandler("screenshot", screenshot))
-    app.add_handler(CommandHandler("debug", debug))
 
-    logger.info("Bot iniciado.")
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CommandHandler("adres", cmd_adres))
+    app.add_handler(CommandHandler("policia", cmd_policia))
+    app.add_handler(CommandHandler("sisben", cmd_sisben))
+    app.add_handler(CommandHandler("rama_nombre", cmd_rama_nombre))
+    app.add_handler(CommandHandler("rama_doc", cmd_rama_doc))
+    app.add_handler(CommandHandler("rama_proc", cmd_rama_proc))
+    app.add_handler(CommandHandler("procuraduria", cmd_procuraduria))
+    app.add_handler(CommandHandler("simit", cmd_simit))
+    app.add_handler(CommandHandler("runt_placa", cmd_runt_placa))
+    app.add_handler(CommandHandler("runt_doc", cmd_runt_doc))
+    app.add_handler(CommandHandler("rues", cmd_rues))
+    app.add_handler(CommandHandler("rues_nombre", cmd_rues_nombre))
+    app.add_handler(CommandHandler("full", cmd_full))
+
+    logger.info("Bot iniciado con 16 comandos.")
     try:
         app.run_polling(allowed_updates=Update.ALL_TYPES)
     finally:
         try:
-            if browser:
-                asyncio.run(browser.close())
+            from services.browser_manager import kill_browser
+            import asyncio as aio
+            aio.run(kill_browser())
         except Exception:
             pass
 
 
 if __name__ == "__main__":
     main()
-
