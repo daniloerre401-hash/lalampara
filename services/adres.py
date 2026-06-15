@@ -2,7 +2,8 @@ import asyncio
 import logging
 import re
 
-from .browser_manager import get_page, browser_ready
+from .browser_manager import get_page
+from . import captcha
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +30,14 @@ async def consultar(doc_type_value: str, doc_number: str) -> str:
     try:
         p = await get_page(ADRES_URL)
     except Exception as e:
-        return f"Error al abrir navegador: {e}. Usa /start"
+        return f"Error al abrir navegador ADRES: {e}"
 
     try:
         if await p.locator("#tipoDoc").count() == 0:
             await p.goto(ADRES_URL, wait_until="networkidle", timeout=60000)
             await asyncio.sleep(3)
             if await p.locator("#tipoDoc").count() == 0:
-                return "Formulario ADRES no encontrado. El sitio puede estar caido o cambio."
+                return "ADRES: formulario no encontrado (sitio caido o cambio)"
 
         await p.evaluate(
             f"document.getElementById('tipoDoc').value = '{doc_type_value}';"
@@ -68,7 +69,7 @@ async def consultar(doc_type_value: str, doc_number: str) -> str:
         }""")
 
         if result_data.startswith("ERR:"):
-            return f"Error en consulta ADRES: {result_data}"
+            return f"ADRES error: {result_data.replace('ERR:', '')}"
 
         if result_data.startswith("OK:"):
             parts = result_data.split(":", 2)
@@ -84,7 +85,7 @@ async def consultar(doc_type_value: str, doc_number: str) -> str:
                 if not result_url.startswith("http"):
                     base = ADRES_URL.rsplit("/", 1)[0]
                     result_url = base + "/" + result_url
-                logger.info(f"Abriendo resultado ADRES: {result_url}")
+                logger.info(f"ADRES resultado: {result_url}")
 
                 try:
                     await p.goto(result_url, wait_until="load", timeout=60000)
@@ -94,21 +95,21 @@ async def consultar(doc_type_value: str, doc_number: str) -> str:
                     except Exception:
                         pass
                 await asyncio.sleep(3)
-                return await _parse_result_page(p)
+                return await _parse(p)
 
-            return _parse_html_fallback(html)
+            return _parse_fallback(html)
 
-        return result_data
+        return str(result_data)
 
     except Exception as e:
-        logger.exception("Error en consulta ADRES")
+        logger.exception("ADRES error")
         estr = str(e)
-        if "closed" in estr.lower() or "detached" in estr.lower():
-            return "La ventana del navegador se cerro. Usa /start para reabrirla."
-        return f"Error: {estr[:200]}"
+        if "closed" in estr.lower():
+            return "ADRES: navegador cerrado. Usa /start"
+        return f"ADRES error: {estr[:200]}"
 
 
-async def _parse_result_page(p) -> str:
+async def _parse(p) -> str:
     rows = await p.evaluate("""() => {
         const tables = document.querySelectorAll('table');
         const data = {};
@@ -120,7 +121,7 @@ async def _parse_result_page(p) -> str:
                 if (th && td) {
                     let key = th.innerText.trim().replace(/[\\s:]+/g, ' ').toUpperCase().trim();
                     let val = td.innerText.trim().replace(/\\s+/g, ' ');
-                    if (key && val && val !== ':' && !key.includes('nbsp')) {
+                    if (key && val && val !== ':') {
                         data[key] = val;
                     }
                 }
@@ -130,27 +131,17 @@ async def _parse_result_page(p) -> str:
     }""")
 
     if rows and len(rows) > 2:
-        return _format_result_dict(rows)
+        return _format(rows)
 
     text = await p.locator("body").inner_text()
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     start = next((i for i, l in enumerate(lines) if "INFORMACION BASICA" in l.upper()), 0)
     end = next((i for i, l in enumerate(lines) if "FECHA DE IMPRESION" in l.upper()), len(lines))
     data = lines[start:end + 1] if end < len(lines) else lines[start:]
-    return _format_result_list(data)
+    return _format_list(data)
 
 
-def _format_result_dict(data: dict) -> str:
-    label_map = {
-        "NOMBRE": "Nombre",
-        "PRIMER APELLIDO": "Apellido",
-        "SEGUNDO APELLIDO": "Apellido",
-        "APELLIDOS": "Apellidos",
-        "NOMBRES": "Nombres",
-        "TIPO DOCUMENTO": "Tipo Doc",
-        "NUMERO DOCUMENTO": "Numero Doc",
-        "DOCUMENTO": "Documento",
-    }
+def _format(data: dict) -> str:
     order = [
         "TIPO DOCUMENTO", "NUMERO DOCUMENTO", "DOCUMENTO",
         "PRIMER APELLIDO", "SEGUNDO APELLIDO", "APELLIDOS",
@@ -161,39 +152,30 @@ def _format_result_dict(data: dict) -> str:
         "FECHA DE AFILIACION", "FECHA DE NACIMIENTO",
         "MUNICIPIO", "DEPARTAMENTO",
         "TIPO DE AFILIADO", "COTIZANTE", "BENEFICIARIO",
-        "SEXO",
-        "DIRECCION", "TELEFONO",
+        "SEXO", "DIRECCION", "TELEFONO",
     ]
-
     lines = ["*ADRES - CONSULTA AFILIADO*", "-" * 30]
     seen = set()
     for key in order:
         norm = key.upper().strip()
         if norm in data:
-            label = label_map.get(norm, norm.title())
-            lines.append(f"{label}: {data[norm]}")
+            lines.append(f"{norm.title()}: {data[norm]}")
             seen.add(norm)
-
-    for key, val in data.items():
-        if key not in seen:
-            label = label_map.get(key, key.title())
-            lines.append(f"{label}: {val}")
-            seen.add(key)
-
+    for k, v in data.items():
+        if k not in seen:
+            lines.append(f"{k.title()}: {v}")
+            seen.add(k)
     lines.append("-" * 30)
     return "\n".join(lines)
 
 
-def _format_result_list(data: list) -> str:
+def _format_list(data: list) -> str:
     cleaned = []
     for line in data:
         line = line.strip()
         if not line or line in (":", "-", ""):
             continue
-        if any(skip in line.upper() for skip in [
-            "FECHA DE IMPRESION", "FECHA DE IMPRESION",
-            "PAGINA", "PAGE", "IMPRESION", "IMPRESION"
-        ]):
+        if any(s in line.upper() for s in ["FECHA DE IMPRESION", "PAGINA", "PAGE", "IMPRESION"]):
             continue
         cleaned.append(line)
 
@@ -208,29 +190,24 @@ def _format_result_list(data: list) -> str:
     return "\n".join(formatted)
 
 
-def _parse_html_fallback(html: str) -> str:
-    solo_texto = re.sub(r"<br\s*/?>", "\n", html)
-    solo_texto = re.sub(r"<[^>]+>", " ", solo_texto)
-    solo_texto = re.sub(r"&[^;]+;", " ", solo_texto)
-    solo_texto = re.sub(r"\s+", " ", solo_texto).strip()
+def _parse_fallback(html: str) -> str:
+    text = re.sub(r"<br\s*/?>", "\n", html)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"&[^;]+;", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
 
-    lines = [l.strip() for l in solo_texto.split("\n") if l.strip()]
-    relevant = [
-        l for l in lines
-        if any(k in l.upper() for k in [
-            "NOMBRE", "APELLIDO", "ESTADO", "EPS", "REGIMEN",
-            "AFILIACION", "AFILIADO", "DOCUMENTO", "CEDULA",
-            "IDENTIFICACION", "MUNICIPIO", "DEPARTAMENTO",
-            "ACTIVO", "SUSPENDIDO", "RETIRADO", "FECHA",
-            "COTIZANTE", "BENEFICIARIO", "CONTRIBUTIVO", "SUBSIDIADO",
-            "SEXO", "DIRECCION", "TELEFONO", "NACIMIENTO",
-        ])
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    keywords = [
+        "NOMBRE", "APELLIDO", "ESTADO", "EPS", "REGIMEN",
+        "AFILIACION", "DOCUMENTO", "CEDULA", "MUNICIPIO",
+        "ACTIVO", "SUSPENDIDO", "RETIRADO", "COTIZANTE",
+        "BENEFICIARIO", "CONTRIBUTIVO", "SUBSIDIADO",
+        "SEXO", "DIRECCION", "TELEFONO", "NACIMIENTO",
     ]
+    relevant = [l for l in lines if any(k in l.upper() for k in keywords)]
     if relevant:
-        return _format_result_list(relevant)
+        return _format_list(relevant)
 
-    words = solo_texto.split()
-    chunks = []
-    for i in range(0, len(words), 20):
-        chunks.append(" ".join(words[i:i + 20]))
-    return "\n".join(chunks[:30])
+    words = text.split()
+    chunks = [" ".join(words[i:i + 20]) for i in range(0, len(words), 20)]
+    return "*ADRES*\n" + "-" * 30 + "\n" + "\n".join(chunks[:20]) + "\n" + "-" * 30

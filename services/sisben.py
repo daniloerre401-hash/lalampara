@@ -2,202 +2,153 @@ import asyncio
 import logging
 import re
 
-from .browser_manager import get_page, browser_ready
+from .browser_manager import get_page
+from . import captcha
 
 logger = logging.getLogger(__name__)
 
-SISBEN_URL = "https://www.sisben.gov.co/Paginas/consulta-tu-grupo.html"
+SISBEN_URL = "https://reportes.sisben.gov.co/dnp_sisbenconsulta"
 
-DOCUMENT_TYPES_SISBEN = {
-    "cedula": "CC",
-    "ti": "TI",
-    "ce": "CE",
-    "rc": "RC",
-    "pasaporte": "PA",
-    "as": "AS",
+SISBEN_DOC_TYPES = {
+    "rc": "1", "registro_civil": "1", "registrocivil": "1",
+    "ti": "2", "tarjeta_identidad": "2",
+    "cc": "3", "cedula": "3", "cedula_ciudadania": "3",
+    "ce": "4", "cedula_extranjeria": "4", "extranjeria": "4",
+    "dni": "5",
+    "pasaporte": "6", "dni_pasaporte": "6",
+    "salvoconducto": "7",
+    "pep": "8", "permiso_especial": "8",
+    "ppt": "9", "proteccion_temporal": "9",
+}
+
+SISBEN_LABELS = {
+    "1": "Registro Civil", "2": "Tarjeta de Identidad",
+    "3": "Cedula de Ciudadania", "4": "Cedula de Extranjeria",
+    "5": "DNI (Pais de origen)", "6": "DNI (Pasaporte)",
+    "7": "Salvoconducto", "8": "Permiso Especial de Permanencia",
+    "9": "Permiso por Proteccion Temporal",
+}
+
+SISBEN_GROUPS = {
+    "A": "POBREZA EXTREMA",
+    "B": "POBREZA MODERADA",
+    "C": "VULNERABLE",
+    "D": "NO POBRE, NO VULNERABLE",
 }
 
 
 async def consultar(doc_type: str, doc_number: str) -> str:
     try:
-        p = await get_page(SISBEN_URL, timeout=90000)
+        p = await get_page(SISBEN_URL, timeout=45000)
     except Exception as e:
         return f"Error al conectar con SISBEN: {e}"
 
     try:
-        await asyncio.sleep(4)
+        await p.goto(SISBEN_URL, wait_until="networkidle", timeout=30000)
+        await asyncio.sleep(3)
 
-        page_title = await p.title()
+        tipo_id = await p.locator("#TipoID").count()
+        if tipo_id == 0:
+            return "SISBEN: formulario no encontrado. El sitio puede haber cambiado."
 
-        iframes = await p.locator("iframe").count()
-        if iframes > 0:
-            logger.info(f"SISBEN: {iframes} iframes encontrados")
-            for i in range(iframes):
-                try:
-                    frame = p.frame_locator("iframe").nth(i)
-                    frame_url = await frame.locator("body").evaluate("() => window.location.href")
-                    logger.info(f"SISBEN iframe {i}: {frame_url}")
-                except Exception:
-                    pass
+        doc_type_value = SISBEN_DOC_TYPES.get(doc_type, "3")
 
-        forms = await p.evaluate("""() => {
-            const allForms = document.querySelectorAll('form');
-            const result = [];
-            allForms.forEach(f => {
-                result.push({
-                    action: f.action,
-                    id: f.id,
-                    inputs: Array.from(f.querySelectorAll('input, select')).map(i => ({
-                        name: i.name, id: i.id, type: i.type, tag: i.tagName,
-                        placeholder: i.placeholder || ''
-                    }))
-                });
-            });
-            return result;
-        }""")
-        logger.info(f"SISBEN forms: {forms}")
-
-        doc_type_value = DOCUMENT_TYPES_SISBEN.get(doc_type, "CC")
-
-        filled = await p.evaluate(f"""(docTypeValue, docNumber) => {{
-            const selects = document.querySelectorAll('select');
-            const inputs = document.querySelectorAll('input[type="text"], input[type="number"], input:not([type])');
-
-            selects.forEach(s => {{
-                const opts = Array.from(s.options);
-                const matching = opts.find(o =>
-                    o.value.toUpperCase().includes(docTypeValue.toUpperCase()) ||
-                    o.text.toUpperCase().includes(docTypeValue.toUpperCase())
-                );
-                if (matching) {{
-                    s.value = matching.value;
-                }}
-            }});
-
-            inputs.forEach(i => {{
-                const name = (i.name || '').toLowerCase();
-                const id = (i.id || '').toLowerCase();
-                if (!i.value && (name.includes('doc') || id.includes('doc') ||
-                    name.includes('numero') || id.includes('numero') ||
-                    name.includes('ident') || id.includes('ident') ||
-                    name.includes('cedula') || id.includes('cedula'))) {{
-                    i.value = docNumber;
-                }}
-            }});
-            return 'filled';
-        }}""", doc_type_value, doc_number)
-        logger.info(f"SISBEN fill result: {filled}")
-
-        submit_btns = await p.evaluate("""() => {
-            const btns = document.querySelectorAll('input[type="submit"], button[type="submit"], button, a.btn');
-            return Array.from(btns).map(b => ({ id: b.id, text: b.innerText?.slice(0, 30), type: b.type }));
+        token = await p.evaluate("""() => {
+            const inp = document.querySelector('input[name=__RequestVerificationToken]');
+            return inp ? inp.value : '';
         }""")
 
-        clicked = False
-        for btn_info in submit_btns:
-            btn_text = (btn_info.get("text") or "").upper()
-            if any(k in btn_text for k in ["CONSULTAR", "BUSCAR", "ENVIAR", "ACEPTAR", "CONTINUAR"]):
-                try:
-                    if btn_info.get("id"):
-                        await p.locator(f"#{btn_info['id']}").click(timeout=5000)
-                        clicked = True
-                        break
-                except Exception:
-                    pass
+        await p.evaluate(f"""() => {{
+            document.getElementById('TipoID').value = '{doc_type_value}';
+            document.getElementById('documento').value = '{doc_number}';
+        }}""")
 
-        if not clicked:
-            try:
-                await p.evaluate("""() => {
-                    const form = document.forms[0];
-                    if (form) {
-                        const fd = new FormData(form);
-                        const xhr = new XMLHttpRequest();
-                        xhr.open('POST', form.action || window.location.href, true);
-                        xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-                        xhr.send(new URLSearchParams(fd).toString());
-                    }
-                }""")
-            except Exception as e:
-                logger.warning(f"SISBEN submit error: {e}")
+        result = await p.evaluate(f"""(token) => {{
+            const form = document.forms[0];
+            const fd = new FormData(form);
+            fd.set('TipoID', document.getElementById('TipoID').value);
+            fd.set('documento', '{doc_number}');
+            fd.set('__RequestVerificationToken', token);
 
-        await asyncio.sleep(5)
+            return new Promise((resolve) => {{
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', form.action, true);
+                xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+                xhr.setRequestHeader('RequestVerificationToken', token);
+                xhr.onload = () => {{
+                    resolve('OK:' + xhr.status + ':' + (xhr.responseText || ''));
+                }};
+                xhr.onerror = () => resolve('ERR:xhr_error');
+                xhr.ontimeout = () => resolve('ERR:timeout');
+                xhr.timeout = 25000;
+                xhr.send(new URLSearchParams(fd).toString());
+            }});
+        }}""", token)
 
-        result_html = await p.content()
-        result_text = await p.locator("body").inner_text()
+        if result.startswith("ERR:"):
+            return f"SISBEN error: {result.replace('ERR:', '')}"
 
-        return _parse_sisben_result(result_text, result_html)
+        if result.startswith("OK:"):
+            parts = result.split(":", 2)
+            html = parts[2] if len(parts) > 2 else ""
+            return _parse(html, doc_number)
+
+        return str(result)
 
     except Exception as e:
-        logger.exception("Error en consulta SISBEN")
-        return f"Error SISBEN: {str(e)[:200]}"
+        logger.exception("SISBEN error")
+        return f"SISBEN error: {str(e)[:200]}"
 
 
-def _parse_sisben_result(text: str, html: str = "") -> str:
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
+def _parse(html: str, doc_number: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", html).replace("&nbsp;", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    text_upper = text.upper()
+
+    if any(k in text_upper for k in [
+        "NO SE ENCUENTRA", "NO SE ENCONTRO", "NO REGISTRA",
+        "SIN RESULTADOS", "NO POSEE", "DOCUMENTO NO VALIDO",
+        "NO ESTA REGISTRADO", "NO CUENTA CON",
+    ]):
+        label = SISBEN_DOC_TYPES.get(doc_number, doc_number)
+        return "*SISBEN IV - RESULTADO*\n" + "-" * 30 + \
+               "\nLa persona NO se encuentra registrada en SISBEN IV\n" + "-" * 30
 
     grupo = None
+    m = re.search(r'(?:grupo|clasificacion)[:\s]*([ABCD])\d*', text_upper)
+    if m:
+        grupo = m.group(1)
+
     subgrupo = None
+    m2 = re.search(r'([ABCD]\d{1,2})', text_upper)
+    if m2:
+        subgrupo = m2.group(1)
+
     nombre = None
+    m3 = re.search(r'(?:nombre|nombres)[:\s]+([A-Za-z\u00C0-\u024F\s]+?)(?:\s{2,}|$)', text, re.IGNORECASE)
+    if m3:
+        nombre = m3.group(1).strip()
+
     puntaje = None
+    m4 = re.search(r'(?:puntaje|puntuacion)[:\s]*(\d+[\.,]\d+)', text_upper)
+    if m4:
+        puntaje = m4.group(1)
 
-    for line in lines:
-        upper = line.upper()
-        if "GRUPO:" in upper or "GRUPO SISBEN" in upper or "CLASIFICACION" in upper:
-            parts = line.replace(":", " ").split()
-            for i, p in enumerate(parts):
-                p_upper = p.upper()
-                if p_upper in ("A", "B", "C", "D") and len(p) == 1:
-                    if i + 1 < len(parts):
-                        grupo = f"{p}{parts[i + 1]}"
-                    else:
-                        grupo = p
-                    break
-                if re.match(r"^[ABCD]\d", p_upper):
-                    grupo = p_upper
-                    break
-        if "PUNTAJE" in upper or "PUNTUACION" in upper:
-            puntaje_match = re.search(r"(\d+[\.,]\d+)", line)
-            if puntaje_match:
-                puntaje = puntaje_match.group(1)
-        if "NOMBRE" in upper:
-            parts = line.split(":", 1)
-            if len(parts) > 1:
-                nombre = parts[1].strip()
+    result = "*SISBEN IV - CLASIFICACION*\n" + "-" * 30
+    if subgrupo:
+        result += f"\nGrupo: {subgrupo}"
+        if grupo:
+            categoria = SISBEN_GROUPS.get(grupo, "")
+            if categoria:
+                result += f" ({categoria})"
+    if nombre:
+        result += f"\nNombre: {nombre}"
+    if puntaje:
+        result += f"\nPuntaje: {puntaje}"
+    result += "\n" + "-" * 30
 
-    if grupo:
-        result = "*SISBEN IV - CLASIFICACION*\n" + "-" * 30
-        result += f"\nGrupo: {grupo}"
-        if nombre:
-            result += f"\nNombre: {nombre}"
-        if puntaje:
-            result += f"\nPuntaje: {puntaje}"
+    if not subgrupo:
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        result += "\n" + "\n".join(lines[:12])
 
-        grupo_letra = grupo[0] if grupo else ""
-        if grupo_letra == "A":
-            result += "\n\nCategoria: POBREZA EXTREMA"
-        elif grupo_letra == "B":
-            result += "\n\nCategoria: POBREZA MODERADA"
-        elif grupo_letra == "C":
-            result += "\n\nCategoria: VULNERABLE"
-        elif grupo_letra == "D":
-            result += "\n\nCategoria: NO POBRE, NO VULNERABLE"
-
-        result += "\n" + "-" * 30
-        return result
-
-    relevant = [
-        l for l in lines
-        if any(k in l.upper() for k in [
-            "GRUPO", "SISBEN", "PUNTAJE", "CLASIFICACION",
-            "NOMBRE", "DOCUMENTO", "IDENTIFICACION",
-            "POBREZA", "VULNERABLE", "SUBSIDIO",
-            "FECHA", "ENCUESTA", "METODOLOGIA",
-            "NO SE ENCUENTRA", "NO REGISTRA",
-        ])
-    ]
-    if relevant:
-        return "*SISBEN IV - RESULTADO*\n" + "-" * 30 + \
-               "\n" + "\n".join(relevant[:25]) + "\n" + "-" * 30
-
-    return "*SISBEN IV - RESULTADO*\n" + "-" * 30 + \
-           f"\nNo se pudo extraer grupo. Respuesta:\n{lines[:15]}\n" + "-" * 30
+    return result
