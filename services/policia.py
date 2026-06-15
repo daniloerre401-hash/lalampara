@@ -69,20 +69,30 @@ async def consultar(doc_type: str, doc_number: str) -> str:
 
 async def _aceptar_terminos(p) -> None:
     try:
-        await p.locator("label[for='aceptaOption:0']").click(timeout=5000)
+        await p.locator("label").filter(has_text="Acepto").click(timeout=5000)
     except Exception:
-        await p.evaluate("""() => {
-            const rb = document.getElementById('aceptaOption:0');
-            if (rb) { rb.checked = true; rb.dispatchEvent(new Event('change',{bubbles:true})); }
-        }""")
+        try:
+            await p.evaluate("""() => {
+                const allLabels = document.querySelectorAll('label');
+                for (let l of allLabels) {
+                    if (l.innerText && l.innerText.trim() === 'Acepto') {
+                        l.click(); break;
+                    }
+                }
+            }""")
+        except Exception:
+            pass
     await asyncio.sleep(2)
     try:
         await p.locator("#continuarBtn").click(timeout=5000)
     except Exception:
-        await p.evaluate("""() => {
-            const b = document.getElementById('continuarBtn');
-            if (b) { b.disabled = false; b.click(); }
-        }""")
+        try:
+            await p.evaluate("""() => {
+                const btn = document.getElementById('continuarBtn');
+                if (btn) { btn.disabled = false; btn.removeAttribute('disabled'); btn.click(); }
+            }""")
+        except Exception:
+            pass
     await asyncio.sleep(4)
 
 

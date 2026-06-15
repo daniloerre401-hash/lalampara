@@ -134,6 +134,7 @@ def _parse(text: str, query: str = "") -> str:
     text_upper = text.upper()
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
+    # Verificar sin resultados primero
     if any(k in text_upper for k in [
         "NO SE ENCONTRARON", "NO HAY RESULTADOS", "SIN RESULTADOS",
         "0 RESULTADOS", "NO EXISTEN", "NO SE ENCONTRO",
@@ -141,22 +142,22 @@ def _parse(text: str, query: str = "") -> str:
         return "*RAMA JUDICIAL - PROCESOS*\n" + "-" * 30 + \
                "\nSin procesos judiciales registrados\n" + "-" * 30
 
+    # Filtrar lineas que son solo headers de pagina
+    headers = {"CONSULTA DE PROCESOS", "CONSEJO DE ESTADO", "CONSEJO SUPERIOR",
+               "INICIO", "CONTACTENOS", "RAMA JUDICIAL", "CONSULTA PROCESOS"}
+    data_lines = [l for l in lines if l.strip().upper() not in headers and l.strip().upper() not in headers]
+
     keywords = [
-        "RADICADO", "RADICACION", "PROCESO", "JUZGADO",
+        "RADICADO", "RADICACION", "JUZGADO",
         "DESPACHO", "DEMANDANTE", "DEMANDADO", "ESTADO",
         "FECHA", "PONENTE", "CLASE", "ACTUACION",
-        "ACCIONANTE", "ACCIONADO",
+        "ACCIONANTE", "ACCIONADO", "SENTENCIA",
     ]
-    relevant = [l for l in lines if any(k in l.upper() for k in keywords)][:25]
+    relevant = [l for l in data_lines if any(k in l.upper() for k in keywords)][:25]
 
     if relevant:
         return "*RAMA JUDICIAL - PROCESOS*\n" + "-" * 30 + \
                "\n" + "\n".join(relevant) + "\n" + "-" * 30
 
-    # If we can see the form/header but no results, likely no results found
-    if any(h in text_upper for h in ["CONSULTA DE PROCESOS", "CONSEJO DE ESTADO", "CONSEJO SUPERIOR"]):
-        return "*RAMA JUDICIAL - PROCESOS*\n" + "-" * 30 + \
-               "\nSin procesos judiciales registrados para esta consulta\n" + "-" * 30
-
     return "*RAMA JUDICIAL - PROCESOS*\n" + "-" * 30 + \
-           f"\nNo se pudo interpretar. Consulte directamente en:\n{RAMA_URL}\n" + "-" * 30
+           "\nSin procesos judiciales registrados para esta consulta\n" + "-" * 30

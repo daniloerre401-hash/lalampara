@@ -34,7 +34,9 @@ async def consultar(doc_type: str, doc_number: str) -> str:
             )
 
         dt = doc_type.upper()
-        await p.evaluate(f"""(dt, dn) => {{
+        await p.evaluate(f"""(args) => {{
+            const dt = args.dt;
+            const dn = args.dn;
             const inputs = document.querySelectorAll('input[type=text], input:not([type])');
             for (let i of inputs) {{
                 const name = (i.name || '').toLowerCase();
@@ -55,7 +57,7 @@ async def consultar(doc_type: str, doc_number: str) -> str:
                 );
                 if (found) {{ s.value = found.value; break; }}
             }}
-        }}""", dt, doc_number)
+        }}""", {"dt": dt, "dn": doc_number})
 
         await p.evaluate("""() => {
             const btns = document.querySelectorAll('button, input[type=submit], a.btn, a[role=button]');
