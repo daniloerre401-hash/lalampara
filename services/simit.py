@@ -3,8 +3,7 @@ import logging
 import re
 import json
 
-from .browser_manager import get_page
-from . import captcha as cap
+from .browser_manager import get_page, new_page
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +22,8 @@ SIMIT_DOC_TYPES = {
 
 async def consultar(doc_type: str, doc_number: str) -> str:
     try:
-        p = await get_page(SIMIT_SPA_URL, timeout=45000)
+        p = await new_page()
+        await p.goto(SIMIT_SPA_URL, wait_until="domcontentloaded", timeout=30000)
     except Exception as e:
         return f"SIMIT error conexion: {e}"
 

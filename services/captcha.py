@@ -31,6 +31,8 @@ async def solve_recaptcha_v2(page, site_key: str) -> str:
         token = result.get("code", "")
         if token:
             logger.info("reCAPTCHA v2 resuelto")
+        else:
+            logger.warning(f"2captcha: token vacio. Result: {result}")
         return token
     except Exception as e:
         logger.warning(f"Error reCAPTCHA: {e}")

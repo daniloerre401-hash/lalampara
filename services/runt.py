@@ -129,22 +129,37 @@ async def consultar_por_documento(doc_number: str) -> str:
 async def _solve_runt_captcha(p) -> bool:
     from . import captcha as cap
     try:
+        # Try reCAPTCHA v2 first
+        sitekey = await p.evaluate("""() => {
+            const html = document.documentElement.innerHTML;
+            const m = html.match(/6L[a-zA-Z0-9_-]{30,}/);
+            return m ? m[0] : null;
+        }""")
+        if sitekey:
+            token = await cap.solve_recaptcha_v2(p, sitekey)
+            if token:
+                await p.evaluate(f"""() => {{
+                    const ta = document.querySelector('textarea[name=\"g-recaptcha-response\"]');
+                    if (ta) ta.value = '{token}';
+                }}""")
+                return True
+
+        # Fallback: try image captcha
         imgs = await p.evaluate("""() => {
             return Array.from(document.querySelectorAll('img')).filter(i =>
                 i.width > 50 && i.height > 20 && i.src && !i.src.includes('logo')
-            ).map(i => ({src: i.src.slice(0, 100), id: i.id, className: i.className}))
+            ).map(i => ({id: i.id, className: i.className.split(' ')[0]}));
         }""")
-        for img in imgs:
-            img_id = img.get("id") or img.get("className")
-            if img_id and await p.locator(f"#{img_id}").count() > 0:
-                solved = await cap.solve_image_captcha(p, f"#{img_id}", "input[id*=mat-input]:last-of-type")
-                if solved:
-                    return True
-            elif img.get("className") and await p.locator(f".{img['className'].split()[0]}").count() > 0:
-                sel = "." + img["className"].split()[0]
-                solved = await cap.solve_image_captcha(p, sel, "input[id*=mat-input]:last-of-type")
-                if solved:
-                    return True
+        for img in imgs[:3]:
+            img_sel = img.get("id") or img.get("className")
+            if img_sel:
+                try:
+                    solved = await cap.solve_image_captcha(p, f"#{img_sel}" if img_sel else f".{img_sel}",
+                        "input[id*=mat-input]:last-of-type")
+                    if solved:
+                        return True
+                except Exception:
+                    pass
         return False
     except Exception:
         return False

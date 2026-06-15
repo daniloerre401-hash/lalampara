@@ -8,7 +8,6 @@ from . import captcha as cap
 logger = logging.getLogger(__name__)
 
 POLICIA_URL = "https://antecedentes.policia.gov.co:7005/WebJudicial/"
-RECAPTCHA_SITEKEY = "6LcsIwQaAAAAAFCsaI-dkR6hgKsZwwJRsmE0tIJH"
 
 
 async def consultar(doc_type: str, doc_number: str) -> str:
@@ -40,7 +39,12 @@ async def consultar(doc_type: str, doc_number: str) -> str:
             f"document.getElementById('cedulaInput').value = '{doc_number}';"
         )
 
-        token = await cap.solve_recaptcha_v2(p, RECAPTCHA_SITEKEY)
+        # Solve reCAPTCHA with dynamic sitekey detection
+        sitekey = await _get_sitekey(p)
+        if not sitekey:
+            return "Policia: no se encontro reCAPTCHA en la pagina."
+
+        token = await cap.solve_recaptcha_v2(p, sitekey)
         if not token:
             return (
                 "Policia: reCAPTCHA no resuelto.\n"
@@ -69,16 +73,11 @@ async def consultar(doc_type: str, doc_number: str) -> str:
 
 async def _aceptar_terminos(p) -> None:
     try:
-        await p.locator("label").filter(has_text="Acepto").click(timeout=5000)
+        await p.locator("label[for=\"aceptaOption:0\"]").click(timeout=5000)
     except Exception:
         try:
             await p.evaluate("""() => {
-                const allLabels = document.querySelectorAll('label');
-                for (let l of allLabels) {
-                    if (l.innerText && l.innerText.trim() === 'Acepto') {
-                        l.click(); break;
-                    }
-                }
+                document.querySelector('label[for="aceptaOption:0"]').click();
             }""")
         except Exception:
             pass
@@ -104,6 +103,20 @@ def _map_doc_type(doc_type: str) -> str:
         "dp": "dp",
     }
     return m.get(doc_type, "cc")
+
+
+async def _get_sitekey(p) -> str | None:
+    return await p.evaluate("""() => {
+        const iframes = document.querySelectorAll('iframe[src*="recaptcha"]');
+        for (let f of iframes) {
+            const m = f.src.match(/[?&]k=([^&]+)/);
+            if (m) return m[1];
+        }
+        const html = document.documentElement.innerHTML;
+        const m = html.match(/6L[a-zA-Z0-9_-]{30,}/);
+        if (m) return m[0];
+        return null;
+    }""")
 
 
 def _parse(text: str, query: str = "") -> str:
