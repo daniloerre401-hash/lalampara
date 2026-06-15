@@ -40,14 +40,19 @@ async def consultar(doc_type: str, doc_number: str) -> str:
         )
 
         # Solve reCAPTCHA with dynamic sitekey detection
+        await asyncio.sleep(2)
         sitekey = await _get_sitekey(p)
         if not sitekey:
             return "Policia: no se encontro reCAPTCHA en la pagina."
 
-        token = await cap.solve_recaptcha_v2(p, sitekey)
+        token = await cap.solve_recaptcha_v2(p, sitekey, invisible=False)
+        if not token:
+            # Retry once
+            await asyncio.sleep(3)
+            token = await cap.solve_recaptcha_v2(p, sitekey, invisible=False)
         if not token:
             return (
-                "Policia: reCAPTCHA no resuelto.\n"
+                f"Policia: reCAPTCHA no resuelto (sitekey={sitekey[:15]}..., url={p.url[:60]}).\n"
                 "Verifica tu CAPTCHA_API_KEY en .env\n"
                 "Link manual: " + POLICIA_URL
             )

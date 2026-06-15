@@ -16,7 +16,7 @@ def get_api_key():
     return _captcha_api_key
 
 
-async def solve_recaptcha_v2(page, site_key: str) -> str:
+async def solve_recaptcha_v2(page, site_key: str, invisible: bool = False) -> str:
     api_key = get_api_key()
     if not api_key:
         logger.warning("CAPTCHA_API_KEY no configurada")
@@ -24,10 +24,15 @@ async def solve_recaptcha_v2(page, site_key: str) -> str:
 
     try:
         solver = TwoCaptcha(api_key)
-        result = solver.recaptcha(
-            sitekey=site_key,
-            url=page.url,
-        )
+        params = {
+            "sitekey": site_key,
+            "url": page.url,
+        }
+        if invisible:
+            params["invisible"] = 1
+
+        logger.info(f"Resolviendo reCAPTCHA en {page.url} con sitekey {site_key[:20]}...")
+        result = solver.recaptcha(**params)
         token = result.get("code", "")
         if token:
             logger.info("reCAPTCHA v2 resuelto")
